@@ -43,17 +43,31 @@
 <body>
   <div id="login-wrap" class="login-wrap">
     <div class="login-card">
-      <h2>Sisselogimine</h2>
-      <p class="hint">Registreeri kasutaja nime, e-posti ja parooliga. Sisselogimine toimub nime ja parooliga.</p>
-      <div class="grid">
-        <div class="field"><label for="loginName">Nimi</label><input id="loginName" maxlength="60" /></div>
-        <div class="field"><label for="registerEmail">E-post (registreerimisel)</label><input id="registerEmail" type="email" maxlength="120" /></div>
-        <div class="field"><label for="loginPassword">Parool</label><input id="loginPassword" type="password" maxlength="120" /></div>
+      <h2>Kasutaja konto</h2>
+      <div class="tabs" style="grid-template-columns:1fr 1fr; margin-bottom:12px;">
+        <button class="tab-btn active" data-auth-tab="login">Sisene</button>
+        <button class="tab-btn" data-auth-tab="register">Registreeri</button>
       </div>
-      <div class="actions">
-        <button id="register-btn" type="button">Registreeri kasutaja</button>
-        <button class="primary" id="login-btn" type="button">Sisene</button>
+
+      <div id="auth-login-pane">
+        <p class="hint">Sisenemiseks sisesta nimi ja parool.</p>
+        <div class="grid">
+          <div class="field"><label for="loginName">Nimi</label><input id="loginName" maxlength="60" /></div>
+          <div class="field"><label for="loginPassword">Parool</label><input id="loginPassword" type="password" maxlength="120" /></div>
+        </div>
+        <div class="actions"><button class="primary" id="login-btn" type="button">Sisene</button></div>
       </div>
+
+      <div id="auth-register-pane" class="hidden">
+        <p class="hint">Registreeri uus kasutaja nime, e-posti ja parooliga.</p>
+        <div class="grid">
+          <div class="field"><label for="registerName">Nimi</label><input id="registerName" maxlength="60" /></div>
+          <div class="field"><label for="registerEmail">E-post</label><input id="registerEmail" type="email" maxlength="120" /></div>
+          <div class="field"><label for="registerPassword">Parool</label><input id="registerPassword" type="password" maxlength="120" /></div>
+        </div>
+        <div class="actions"><button id="register-btn" type="button">Registreeri kasutaja</button></div>
+      </div>
+
       <div id="login-msg"></div>
     </div>
   </div>
@@ -120,6 +134,30 @@
     let editingBeerId = null;
     let sessionJudgeName = '';
     let localDraftRatings = [];
+
+    const authTabButtons = document.querySelectorAll('[data-auth-tab]');
+    authTabButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.dataset.authTab;
+        authTabButtons.forEach((b) => b.classList.toggle('active', b === btn));
+        document.getElementById('auth-login-pane').classList.toggle('hidden', tab !== 'login');
+        document.getElementById('auth-register-pane').classList.toggle('hidden', tab !== 'register');
+      });
+    });
+
+    const applyLoggedInUser = async (user) => {
+      currentUser = user;
+      document.getElementById('login-wrap').classList.add('hidden');
+      document.getElementById('app').classList.remove('hidden');
+      document.getElementById('hello-line').textContent = `Tere, ${currentUser.name}!`;
+      document.getElementById('brewerName').value = currentUser.name;
+      document.getElementById('judge-label').textContent = currentUser.name;
+      sessionJudgeName = currentUser.name;
+      setRegistrationLockedUi(currentUser.registrationLocked);
+      await renderMyBeers();
+      await renderResults();
+    };
+
 
     const showMessage = (id, text, type) => { document.getElementById(id).innerHTML = `<div class="msg ${type}">${text}</div>`; };
     const api = async (url, options = {}) => {
@@ -252,15 +290,16 @@
 
       updateSubmitState();
     };
-
-
     document.getElementById('register-btn').addEventListener('click', async () => {
-      const name = document.getElementById('loginName').value.trim();
+      const name = document.getElementById('registerName').value.trim();
       const email = document.getElementById('registerEmail').value.trim();
-      const password = document.getElementById('loginPassword').value;
+      const password = document.getElementById('registerPassword').value;
       if (!name || !email || !password) return showMessage('login-msg', 'Sisesta nimi, e-post ja parool.', 'warn');
       try {
         await api('/api/users/register', { method: 'POST', body: JSON.stringify({ name, email, password }) });
+        document.querySelector('[data-auth-tab="login"]').click();
+        document.getElementById('loginName').value = name;
+        document.getElementById('loginPassword').value = password;
         showMessage('login-msg', 'Kasutaja registreeritud. Nüüd saad sisse logida.', 'ok');
       } catch (error) {
         showMessage('login-msg', `Viga: ${error.message}`, 'warn');
@@ -273,16 +312,7 @@
       if (!name || !password) return showMessage('login-msg', 'Sisesta nimi ja parool.', 'warn');
       try {
         const user = await api('/api/users/login', { method: 'POST', body: JSON.stringify({ name, password }) });
-        currentUser = user;
-        document.getElementById('login-wrap').classList.add('hidden');
-        document.getElementById('app').classList.remove('hidden');
-        document.getElementById('hello-line').textContent = `Tere, ${currentUser.name}!`;
-        document.getElementById('brewerName').value = currentUser.name;
-        document.getElementById('judge-label').textContent = currentUser.name;
-        sessionJudgeName = currentUser.name;
-        setRegistrationLockedUi(currentUser.registrationLocked);
-        await renderMyBeers();
-        await renderResults();
+        await applyLoggedInUser(user);
       } catch (error) {
         showMessage('login-msg', `Viga: ${error.message}`, 'warn');
       }
@@ -413,8 +443,19 @@
       `;
     };
 
+
+    const tryRestoreSession = async () => {
+      try {
+        const user = await api('/api/session');
+        await applyLoggedInUser(user);
+      } catch {
+        // no active session
+      }
+    };
+
     clearBeerFormForCreate();
     updateSubmitState();
+    tryRestoreSession();
   </script>
 </body>
 </html>

@@ -50,12 +50,13 @@ const writeStore = (store) => {
   fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
 };
 
-const json = (res, status, payload) => {
+const json = (res, status, payload, extraHeaders = {}) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': 'Content-Type',
+    ...extraHeaders
   });
   res.end(JSON.stringify(payload));
 };
@@ -102,6 +103,16 @@ const sanitizeUser = (user) => ({
   hasEmail: Boolean(user.encryptedEmail)
 });
 
+
+const parseCookies = (cookieHeader) => {
+  const map = {};
+  String(cookieHeader || '').split(';').forEach((part) => {
+    const i = part.indexOf('=');
+    if (i > -1) map[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  });
+  return map;
+};
+
 const validateRatingEntry = (entry, registrationsById) => {
   const beerId = String(entry.beerId || '');
   const overall = Number(entry.overall);
@@ -133,6 +144,16 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/') {
     sendFile(res, path.join(ROOT, 'index.html'));
     return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/session') {
+    const store = readStore();
+    const cookies = parseCookies(req.headers.cookie);
+    const username = cleanName(cookies.beermeets_user);
+    if (!username) return json(res, 401, { error: 'No active session' });
+    const user = userByName(store, username);
+    if (!user) return json(res, 401, { error: 'Session user not found' });
+    return json(res, 200, sanitizeUser(user));
   }
 
   if (req.method === 'POST' && url.pathname === '/api/users/register') {
@@ -180,7 +201,7 @@ const server = http.createServer(async (req, res) => {
       const storedPassword = decryptText(user.encryptedPassword);
       if (!storedPassword || storedPassword !== password) return json(res, 401, { error: 'Invalid password' });
 
-      return json(res, 200, sanitizeUser(user));
+      return json(res, 200, sanitizeUser(user), { 'Set-Cookie': `beermeets_user=${encodeURIComponent(user.name)}; Path=/; Max-Age=2592000; SameSite=Lax` });
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
     }
