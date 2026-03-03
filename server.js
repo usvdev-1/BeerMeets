@@ -98,8 +98,10 @@ const sanitizeUser = (user) => ({
   id: user.id,
   name: user.name,
   registrationLocked: !!user.registrationLocked,
+  ratingCompleted: !!user.ratingCompleted,
   createdAt: user.createdAt,
   registrationLockedAt: user.registrationLockedAt || null,
+  ratingCompletedAt: user.ratingCompletedAt || null,
   hasEmail: Boolean(user.encryptedEmail)
 });
 
@@ -179,6 +181,7 @@ const server = http.createServer(async (req, res) => {
         encryptedPassword: encryptText(password),
         encryptedEmail: encryptText(email),
         registrationLocked: false,
+        ratingCompleted: false,
         createdAt: Date.now()
       };
 
@@ -227,6 +230,11 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
     }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/users') {
+    const store = readStore();
+    return json(res, 200, store.users.map(sanitizeUser));
   }
 
   if (req.method === 'GET' && url.pathname === '/api/registrations') {
@@ -292,6 +300,83 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/ratings') return json(res, 200, readStore().ratings);
+
+  if (req.method === 'POST' && url.pathname === '/api/ratings/one') {
+    try {
+      const body = await readBody(req);
+      const judgeName = cleanName(body.judgeName);
+      const beerId = String(body.beerId || '');
+      const overall = Number(body.overall);
+      const aroma = parseOptional(body.aroma);
+      const appearance = parseOptional(body.appearance);
+      const flavor = parseOptional(body.flavor);
+      const mouthfeel = parseOptional(body.mouthfeel);
+
+      const store = readStore();
+      const user = userByName(store, judgeName);
+      if (!user) return json(res, 404, { error: 'User not found' });
+
+      const registrationsById = new Map(store.registrations.map((r) => [r.id, r]));
+      const checked = validateRatingEntry({ beerId, overall, aroma, appearance, flavor, mouthfeel }, registrationsById);
+      if (!checked.ok) return json(res, 400, { error: 'Invalid rating data' });
+
+      const existing = store.ratings.find((r) => String(r.judgeName).toLowerCase() === judgeName.toLowerCase() && r.beerId === beerId);
+      if (existing) {
+        existing.overall = overall;
+        existing.aroma = aroma;
+        existing.appearance = appearance;
+        existing.flavor = flavor;
+        existing.mouthfeel = mouthfeel;
+        existing.updatedAt = Date.now();
+      } else {
+        store.ratings.push({
+          id: crypto.randomUUID(),
+          judgeName,
+          beerId,
+          overall,
+          aroma,
+          appearance,
+          flavor,
+          mouthfeel,
+          createdAt: Date.now()
+        });
+      }
+
+      user.ratingCompleted = false;
+      user.ratingCompletedAt = null;
+      writeStore(store);
+      return json(res, 200, { ok: true });
+    } catch {
+      return json(res, 400, { error: 'Malformed JSON' });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/ratings/complete') {
+    try {
+      const body = await readBody(req);
+      const judgeName = cleanName(body.judgeName);
+      if (!judgeName) return json(res, 400, { error: 'Judge name is required' });
+
+      const store = readStore();
+      const user = userByName(store, judgeName);
+      if (!user) return json(res, 404, { error: 'User not found' });
+
+      const requiredBeerIds = new Set(store.registrations.map((r) => r.id));
+      if (requiredBeerIds.size === 0) return json(res, 400, { error: 'No registered beers' });
+
+      const judgeRatings = store.ratings.filter((r) => String(r.judgeName).toLowerCase() === judgeName.toLowerCase());
+      const judgeBeerIds = new Set(judgeRatings.map((r) => r.beerId));
+      const allRated = requiredBeerIds.size === judgeBeerIds.size && [...requiredBeerIds].every((id) => judgeBeerIds.has(id));
+      if (!allRated) return json(res, 400, { error: 'Not all beers are rated' });
+
+      user.ratingCompleted = true;
+      user.ratingCompletedAt = Date.now();
+      writeStore(store);
+      return json(res, 200, { ok: true, user: sanitizeUser(user) });
+    } catch {
+      return json(res, 400, { error: 'Malformed JSON' });
+    }
+  }
 
   if (req.method === 'POST' && url.pathname === '/api/ratings/batch') {
     try {

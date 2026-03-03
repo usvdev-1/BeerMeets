@@ -32,14 +32,14 @@
     .beer-title { font-weight:700; margin-bottom:8px; }
     .small-note { font-size:12px; color:var(--muted); }
     table { width:100%; border-collapse:collapse; margin-top:8px; }
-    #my-beers-wrap { overflow-x:auto; }
+    #my-beers-wrap, #results-wrap { overflow-x:auto; }
     th,td { border-bottom:1px solid var(--border); text-align:left; padding:10px 8px; font-size:14px; }
     .score { font-weight:700; color:var(--accent-2); }
     .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
     .header-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .login-wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(15,23,42,.55); z-index:1000; }
     .login-card { width:min(100%,460px); margin:0; box-shadow:0 20px 50px rgba(0,0,0,.25); }
-    @media (max-width:740px) { .tabs,.grid { grid-template-columns:1fr; } #results-wrap th:nth-child(4),#results-wrap td:nth-child(4){display:none;} }
+    @media (max-width:740px) { .tabs,.grid { grid-template-columns:1fr; } #results-wrap table { min-width:560px; } }
   </style>
 </head>
 <body>
@@ -103,7 +103,7 @@
           <button class="primary" type="submit" id="save-beer-btn">Registreeri õlu</button>
           <button type="button" id="cancel-edit-btn" class="hidden">Tühista muutmine</button>
           <button type="button" id="lock-registration-btn">Kinnita: kõik õlled on registreeritud</button>
-          <button type="button" id="clear-all">Kustuta kohtumise andmed</button>
+          
         </div>
       </form>
       <h3>Minu registreeritud õlled</h3>
@@ -115,8 +115,7 @@
       <h2>Hindamine kohtumise ajal</h2>
       <div class="hint">Hindaja: <strong id="judge-label"></strong></div>
       <div class="actions">
-        <button class="primary" type="button" id="load-rating-session">Laadi õllede nimekiri</button>
-        <button class="primary" type="button" id="submit-all-ratings" disabled>Saada kõik hinded serverisse</button>
+        <button class="primary" type="button" id="submit-all-ratings" disabled>Lõpeta hindamine</button>
       </div>
       <p class="hint">Sinu enda õllele määratakse Overall = 0 (keskmisesse ei arvestata).</p>
       <div id="rating-progress" class="hint"></div>
@@ -174,6 +173,7 @@
 
     const fetchRegistrations = (brewerName) => api(`/api/registrations${brewerName ? `?brewerName=${encodeURIComponent(brewerName)}` : ''}`);
     const fetchRatings = () => api('/api/ratings');
+    const fetchUsers = () => api('/api/users');
 
     const setRegistrationLockedUi = (locked) => {
       const disabled = !!locked;
@@ -187,17 +187,17 @@
       if (disabled) showMessage('registration-msg', 'Registreerimise leht on sinu jaoks suletud. Mine hindamise vahekaardile.', 'ok');
     };
 
-    const isResultsReady = (registrations, ratings) => {
+    const isResultsReady = (registrations, users) => {
       if (registrations.length === 0) return false;
       const brewerNames = [...new Set(registrations.map((r) => r.brewerName.toLowerCase()))];
-      const beerCount = registrations.length;
-      return brewerNames.every((name) => ratings.filter((r) => String(r.judgeName || '').toLowerCase() === name).length === beerCount);
+      return brewerNames.every((name) => users.some((u) => String(u.name || '').toLowerCase() === name && u.ratingCompleted));
     };
 
     const activateMainTab = async (tab) => {
       tabs.forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
       sections.forEach((id) => document.getElementById(id).classList.toggle('hidden', id !== tab));
       if (tab === 'registration') await renderMyBeers();
+      if (tab === 'rating') await loadRatingSession();
       if (tab === 'results') await renderResults();
     };
 
@@ -213,7 +213,7 @@
       const pending = localDraftRatings.filter((r) => r.overall === null).length;
       const total = localDraftRatings.length;
       const done = total > 0 ? total - pending : 0;
-      document.getElementById('rating-progress').textContent = total ? `Täidetud ${done} / ${total} hinnangut.` : 'Laadi kõigepealt õllede nimekiri.';
+      document.getElementById('rating-progress').textContent = total ? `Täidetud ${done} / ${total} hinnangut.` : 'Hinnatavaid õllesid pole.';
       document.getElementById('submit-all-ratings').disabled = !(total > 0 && pending === 0);
     };
 
@@ -279,6 +279,7 @@
             <div class="field"><label>Maitse (valikuline 1-10)</label><input type="number" min="1" max="10" value="${entry.flavor ?? ''}" data-idx="${idx}" data-field="flavor" /></div>
             <div class="field"><label>Mouthfeel (valikuline 1-10)</label><input type="number" min="1" max="10" value="${entry.mouthfeel ?? ''}" data-idx="${idx}" data-field="mouthfeel" /></div>
           </div>
+          <div class="actions"><button type="button" class="primary" data-save-idx="${idx}">Salvesta selle õlle hinnang</button></div>
         </div>
       `).join('');
 
@@ -296,7 +297,73 @@
         });
       });
 
+      wrap.querySelectorAll('button[data-save-idx]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const idx = Number(btn.dataset.saveIdx);
+          const entry = localDraftRatings[idx];
+          if (!entry) return;
+          if (entry.overall === null) {
+            showMessage('rating-msg', 'Overall peab olema täidetud enne salvestamist.', 'warn');
+            return;
+          }
+          try {
+            await api('/api/ratings/one', {
+              method: 'POST',
+              body: JSON.stringify({
+                judgeName: currentUser.name,
+                beerId: entry.beerId,
+                overall: Number(entry.overall),
+                aroma: entry.aroma,
+                appearance: entry.appearance,
+                flavor: entry.flavor,
+                mouthfeel: entry.mouthfeel
+              })
+            });
+            showMessage('rating-msg', `Hinnang salvestatud: ${entry.beerName}.`, 'ok');
+          } catch (error) {
+            showMessage('rating-msg', `Viga: ${error.message}`, 'warn');
+          }
+        });
+      });
+
       updateSubmitState();
+    };
+
+    const loadRatingSession = async () => {
+      if (!currentUser) return;
+      try {
+        const [registrations, ratings] = await Promise.all([fetchRegistrations(), fetchRatings()]);
+        if (registrations.length === 0) {
+          localDraftRatings = [];
+          renderRatingList();
+          return;
+        }
+
+        const myRatings = ratings.filter((r) => String(r.judgeName || '').toLowerCase() === currentUser.name.toLowerCase());
+        const byBeer = new Map(myRatings.map((r) => [r.beerId, r]));
+
+        localDraftRatings = registrations.map((beer) => {
+          const existing = byBeer.get(beer.id);
+          const isOwnBeer = beer.brewerName.toLowerCase() === currentUser.name.toLowerCase();
+          return {
+            beerId: beer.id,
+            brewerName: beer.brewerName,
+            beerName: beer.beerName,
+            beerStyle: beer.beerStyle,
+            beerAbv: beer.beerAbv,
+            isOwnBeer,
+            overall: existing ? Number(existing.overall) : (isOwnBeer ? 0 : null),
+            aroma: existing?.aroma ?? null,
+            appearance: existing?.appearance ?? null,
+            flavor: existing?.flavor ?? null,
+            mouthfeel: existing?.mouthfeel ?? null
+          };
+        });
+
+        renderRatingList();
+      } catch (error) {
+        showMessage('rating-msg', `Viga: ${error.message}`, 'warn');
+      }
     };
     document.getElementById('register-btn').addEventListener('click', async () => {
       const name = document.getElementById('registerName').value.trim();
@@ -366,71 +433,25 @@
       }
     });
 
-    document.getElementById('load-rating-session').addEventListener('click', async () => {
-      if (!currentUser) return;
-      try {
-        const registrations = await fetchRegistrations();
-        if (registrations.length === 0) return showMessage('rating-msg', 'Registreeritud õllesid pole.', 'warn');
-
-        localDraftRatings = registrations.map((beer) => {
-          const isOwnBeer = beer.brewerName.toLowerCase() === currentUser.name.toLowerCase();
-          return {
-            beerId: beer.id,
-            brewerName: beer.brewerName,
-            beerName: beer.beerName,
-            beerStyle: beer.beerStyle,
-            beerAbv: beer.beerAbv,
-            isOwnBeer,
-            overall: isOwnBeer ? 0 : null,
-            aroma: null,
-            appearance: null,
-            flavor: null,
-            mouthfeel: null
-          };
-        });
-        showMessage('rating-msg', 'Kohalik hindamissessioon on laaditud.', 'ok');
-        renderRatingList();
-      } catch (error) {
-        showMessage('rating-msg', `Viga: ${error.message}`, 'warn');
-      }
-    });
-
     document.getElementById('submit-all-ratings').addEventListener('click', async () => {
-      if (!currentUser || localDraftRatings.length === 0) return showMessage('rating-msg', 'Laadi kõigepealt hindamissessioon.', 'warn');
-      if (localDraftRatings.some((r) => r.overall === null)) return showMessage('rating-msg', 'Overall peab olema täidetud kõigi õllede jaoks.', 'warn');
-
-      const payload = {
-        judgeName: currentUser.name,
-        ratings: localDraftRatings.map((r) => ({ beerId: r.beerId, overall: Number(r.overall), aroma: r.aroma, appearance: r.appearance, flavor: r.flavor, mouthfeel: r.mouthfeel }))
-      };
+      if (!currentUser || localDraftRatings.length === 0) return showMessage('rating-msg', 'Hinnatavaid õllesid pole.', 'warn');
+      if (localDraftRatings.some((r) => r.overall === null)) return showMessage('rating-msg', 'Kõigile õlledele peab olema Overall sisestatud.', 'warn');
 
       try {
-        await api('/api/ratings/batch', { method: 'POST', body: JSON.stringify(payload) });
-        showMessage('rating-msg', 'Kõik hinded saadeti serverisse.', 'ok');
+        await api('/api/ratings/complete', { method: 'POST', body: JSON.stringify({ judgeName: currentUser.name }) });
+        showMessage('rating-msg', 'Hindamine on lõpetatud ja kinnitatud.', 'ok');
+        currentUser = await api('/api/session');
+        await renderResults();
       } catch (error) {
         showMessage('rating-msg', `Viga: ${error.message}`, 'warn');
-      }
-    });
-
-    document.getElementById('clear-all').addEventListener('click', async () => {
-      if (!confirm('Kas kustutada kõik registreeringud ja hinded serverist?')) return;
-      try {
-        await api('/api/all', { method: 'DELETE' });
-        localDraftRatings = [];
-        setRegistrationLockedUi(false);
-        clearBeerFormForCreate();
-        await renderMyBeers();
-        showMessage('registration-msg', 'Kohtumise andmed kustutati.', 'ok');
-      } catch (error) {
-        showMessage('registration-msg', `Viga: ${error.message}`, 'warn');
       }
     });
 
     const renderResults = async () => {
       const wrap = document.getElementById('results-wrap');
-      const [registrations, ratings] = await Promise.all([fetchRegistrations(), fetchRatings()]);
+      const [registrations, ratings, users] = await Promise.all([fetchRegistrations(), fetchRatings(), fetchUsers()]);
 
-      if (!isResultsReady(registrations, ratings)) {
+      if (!isResultsReady(registrations, users)) {
         wrap.innerHTML = '<div class="msg warn">Tulemused pole veel saadaval: kõik registreeritud pruulijad ei ole veel kõigi õllede hindeid serverisse saatnud.</div>';
         return;
       }
