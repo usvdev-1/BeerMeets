@@ -1,12 +1,31 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { randomUUID } = require('crypto');
+const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
+
+const ENC_KEY = crypto.createHash('sha256').update(process.env.BEERMEETS_SECRET || 'beermeets-dev-secret').digest();
+
+const encryptText = (plain) => {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENC_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
+};
+
+const decryptText = (payload) => {
+  const [ivB64, tagB64, dataB64] = String(payload || '').split(':');
+  if (!ivB64 || !tagB64 || !dataB64) return '';
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENC_KEY, Buffer.from(ivB64, 'base64'));
+  decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+  const plain = Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]);
+  return plain.toString('utf8');
+};
 
 const ensureDataFile = () => {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -69,18 +88,19 @@ const sendFile = (res, filePath) => {
 const parseOptional = (v) => (v === null || v === '' || v === undefined ? null : Number(v));
 const validOptional = (v) => v === null || (!Number.isNaN(v) && v >= 1 && v <= 10);
 const cleanName = (v) => String(v || '').trim();
-
-const ensureUser = (store, name) => {
-  const lower = name.toLowerCase();
-  let user = store.users.find((u) => String(u.name || '').toLowerCase() === lower);
-  if (!user) {
-    user = { id: randomUUID(), name, registrationLocked: false, createdAt: Date.now() };
-    store.users.push(user);
-  }
-  return user;
-};
+const cleanEmail = (v) => String(v || '').trim().toLowerCase();
+const validateEmail = (email) => /^\S+@\S+\.\S+$/.test(email);
 
 const userByName = (store, name) => store.users.find((u) => String(u.name || '').toLowerCase() === String(name || '').toLowerCase());
+
+const sanitizeUser = (user) => ({
+  id: user.id,
+  name: user.name,
+  registrationLocked: !!user.registrationLocked,
+  createdAt: user.createdAt,
+  registrationLockedAt: user.registrationLockedAt || null,
+  hasEmail: Boolean(user.encryptedEmail)
+});
 
 const validateRatingEntry = (entry, registrationsById) => {
   const beerId = String(entry.beerId || '');
@@ -119,42 +139,48 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const name = cleanName(body.name);
+      const password = String(body.password || '');
+      const email = cleanEmail(body.email);
+
       if (!name) return json(res, 400, { error: 'Name is required' });
+      if (password.length < 4) return json(res, 400, { error: 'Password must be at least 4 chars' });
+      if (!validateEmail(email)) return json(res, 400, { error: 'Invalid email' });
+
       const store = readStore();
-      const exists = userByName(store, name);
-      if (exists) return json(res, 409, { error: 'User already exists' });
-      const user = ensureUser(store, name);
+      if (userByName(store, name)) return json(res, 409, { error: 'User already exists' });
+
+      const user = {
+        id: crypto.randomUUID(),
+        name,
+        encryptedPassword: encryptText(password),
+        encryptedEmail: encryptText(email),
+        registrationLocked: false,
+        createdAt: Date.now()
+      };
+
+      store.users.push(user);
       writeStore(store);
-      return json(res, 201, user);
+      return json(res, 201, sanitizeUser(user));
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
     }
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/users/login') {
+  if ((req.method === 'POST' && url.pathname === '/api/users/login') || (req.method === 'POST' && url.pathname === '/api/login')) {
     try {
       const body = await readBody(req);
       const name = cleanName(body.name);
-      if (!name) return json(res, 400, { error: 'Name is required' });
-      const store = readStore();
-      const user = userByName(store, name);
-      if (!user) return json(res, 404, { error: 'User not found. Please register first.' });
-      return json(res, 200, user);
-    } catch {
-      return json(res, 400, { error: 'Malformed JSON' });
-    }
-  }
+      const password = String(body.password || '');
+      if (!name || !password) return json(res, 400, { error: 'Name and password are required' });
 
-  // Backward compatible alias
-  if (req.method === 'POST' && url.pathname === '/api/login') {
-    try {
-      const body = await readBody(req);
-      const name = cleanName(body.name);
-      if (!name) return json(res, 400, { error: 'Name is required' });
       const store = readStore();
       const user = userByName(store, name);
       if (!user) return json(res, 404, { error: 'User not found. Please register first.' });
-      return json(res, 200, user);
+
+      const storedPassword = decryptText(user.encryptedPassword);
+      if (!storedPassword || storedPassword !== password) return json(res, 401, { error: 'Invalid password' });
+
+      return json(res, 200, sanitizeUser(user));
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
     }
@@ -165,12 +191,15 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const name = cleanName(body.name);
       if (!name) return json(res, 400, { error: 'Name is required' });
+
       const store = readStore();
-      const user = ensureUser(store, name);
+      const user = userByName(store, name);
+      if (!user) return json(res, 404, { error: 'User not found' });
+
       user.registrationLocked = true;
       user.registrationLockedAt = Date.now();
       writeStore(store);
-      return json(res, 200, { ok: true, user });
+      return json(res, 200, { ok: true, user: sanitizeUser(user) });
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
     }
@@ -192,15 +221,14 @@ const server = http.createServer(async (req, res) => {
       const beerName = cleanName(body.beerName);
       const beerStyle = cleanName(body.beerStyle);
       const beerAbv = Number(body.beerAbv);
-      if (!brewerName || !beerName || !beerStyle || Number.isNaN(beerAbv) || beerAbv < 0 || beerAbv > 25) {
-        return json(res, 400, { error: 'Invalid registration data' });
-      }
+      if (!brewerName || !beerName || !beerStyle || Number.isNaN(beerAbv) || beerAbv < 0 || beerAbv > 25) return json(res, 400, { error: 'Invalid registration data' });
 
       const store = readStore();
-      const user = ensureUser(store, brewerName);
+      const user = userByName(store, brewerName);
+      if (!user) return json(res, 404, { error: 'User not found' });
       if (user.registrationLocked) return json(res, 403, { error: 'Registration is locked for this user' });
 
-      const record = { id: randomUUID(), brewerName, beerName, beerStyle, beerAbv, createdAt: Date.now() };
+      const record = { id: crypto.randomUUID(), brewerName, beerName, beerStyle, beerAbv, createdAt: Date.now() };
       store.registrations.push(record);
       writeStore(store);
       return json(res, 201, record);
@@ -217,19 +245,16 @@ const server = http.createServer(async (req, res) => {
       const beerName = cleanName(body.beerName);
       const beerStyle = cleanName(body.beerStyle);
       const beerAbv = Number(body.beerAbv);
-      if (!id || !brewerName || !beerName || !beerStyle || Number.isNaN(beerAbv) || beerAbv < 0 || beerAbv > 25) {
-        return json(res, 400, { error: 'Invalid update data' });
-      }
+      if (!id || !brewerName || !beerName || !beerStyle || Number.isNaN(beerAbv) || beerAbv < 0 || beerAbv > 25) return json(res, 400, { error: 'Invalid update data' });
 
       const store = readStore();
-      const user = ensureUser(store, brewerName);
+      const user = userByName(store, brewerName);
+      if (!user) return json(res, 404, { error: 'User not found' });
       if (user.registrationLocked) return json(res, 403, { error: 'Registration is locked for this user' });
 
       const item = store.registrations.find((r) => r.id === id);
       if (!item) return json(res, 404, { error: 'Beer not found' });
-      if (String(item.brewerName).toLowerCase() !== brewerName.toLowerCase()) {
-        return json(res, 403, { error: 'Cannot edit another brewer beer' });
-      }
+      if (String(item.brewerName).toLowerCase() !== brewerName.toLowerCase()) return json(res, 403, { error: 'Cannot edit another brewer beer' });
 
       item.beerName = beerName;
       item.beerStyle = beerStyle;
@@ -242,9 +267,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/ratings') {
-    return json(res, 200, readStore().ratings);
-  }
+  if (req.method === 'GET' && url.pathname === '/api/ratings') return json(res, 200, readStore().ratings);
 
   if (req.method === 'POST' && url.pathname === '/api/ratings/batch') {
     try {
@@ -253,10 +276,9 @@ const server = http.createServer(async (req, res) => {
       const incoming = Array.isArray(body.ratings) ? body.ratings : [];
       const store = readStore();
       const knownBrewers = new Set(store.registrations.map((r) => String(r.brewerName).toLowerCase()));
+
       if (!judgeName || !knownBrewers.has(judgeName.toLowerCase())) return json(res, 400, { error: 'Unknown judge' });
-      if (incoming.length !== store.registrations.length || incoming.length === 0) {
-        return json(res, 400, { error: 'Must provide ratings for all registered beers' });
-      }
+      if (incoming.length !== store.registrations.length || incoming.length === 0) return json(res, 400, { error: 'Must provide ratings for all registered beers' });
 
       const registrationsById = new Map(store.registrations.map((r) => [r.id, r]));
       const uniqueBeerIds = new Set();
@@ -266,7 +288,7 @@ const server = http.createServer(async (req, res) => {
         if (!checked.ok) return json(res, 400, { error: 'Invalid rating data' });
         if (uniqueBeerIds.has(checked.rating.beerId)) return json(res, 400, { error: 'Duplicate beer rating' });
         uniqueBeerIds.add(checked.rating.beerId);
-        prepared.push({ id: randomUUID(), judgeName, ...checked.rating, createdAt: Date.now() });
+        prepared.push({ id: crypto.randomUUID(), judgeName, ...checked.rating, createdAt: Date.now() });
       }
       if (uniqueBeerIds.size !== store.registrations.length) return json(res, 400, { error: 'Missing beer ratings' });
 
