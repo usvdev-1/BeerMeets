@@ -226,11 +226,14 @@
     const parseOptional = (raw) => (raw === '' ? null : Number(raw));
 
     const updateSubmitState = () => {
-      const pending = localDraftRatings.filter((r) => r.overall === null).length;
-      const total = localDraftRatings.length;
-      const done = total > 0 ? total - pending : 0;
-      document.getElementById('rating-progress').textContent = total ? `Täidetud ${done} / ${total} hinnangut.` : 'Hinnatavaid õllesid pole.';
-      document.getElementById('submit-all-ratings').disabled = !(total > 0 && pending === 0);
+      const required = localDraftRatings.filter((r) => !r.isOwnBeer);
+      const total = required.length;
+      const withOverall = required.filter((r) => r.overall !== null).length;
+      const saved = required.filter((r) => r.saved === true).length;
+      document.getElementById('rating-progress').textContent = total
+        ? `Täidetud Overall: ${withOverall}/${total}. Serverisse salvestatud: ${saved}/${total}.`
+        : 'Hinnatavaid õllesid pole.';
+      document.getElementById('submit-all-ratings').disabled = !(total >= 0 && withOverall === total && saved === total);
     };
 
     const clearBeerFormForCreate = () => {
@@ -275,6 +278,8 @@
       });
     };
 
+    const valuesEqual = (a, b) => (a === null || a === undefined ? null : Number(a)) === (b === null || b === undefined ? null : Number(b));
+
     const renderRatingList = () => {
       const wrap = document.getElementById('beer-rating-list');
       if (localDraftRatings.length === 0) {
@@ -295,7 +300,7 @@
             <div class="field"><label>Maitse (valikuline 1-10)</label><input type="number" min="1" max="10" value="${entry.flavor ?? ''}" data-idx="${idx}" data-field="flavor" /></div>
             <div class="field"><label>Mouthfeel (valikuline 1-10)</label><input type="number" min="1" max="10" value="${entry.mouthfeel ?? ''}" data-idx="${idx}" data-field="mouthfeel" /></div>
           </div>
-          <div class="actions"><button type="button" class="primary" data-save-idx="${idx}">Salvesta selle õlle hinnang</button></div>
+          ${entry.isOwnBeer ? '' : `<div class="actions"><button type="button" class="${entry.saved ? '' : 'primary'}" data-save-idx="${idx}">${entry.saved ? 'Salvestatud' : 'Salvesta selle õlle hinnang'}</button></div>`}
         </div>
       `).join('');
 
@@ -303,13 +308,26 @@
         input.addEventListener('input', () => {
           const idx = Number(input.dataset.idx);
           const field = input.dataset.field;
+          const entry = localDraftRatings[idx];
+          if (!entry) return;
+
           if (field === 'overall') {
             const v = input.value === '' ? null : Number(input.value);
-            localDraftRatings[idx].overall = Number.isNaN(v) ? null : v;
+            entry.overall = Number.isNaN(v) ? null : v;
           } else {
-            localDraftRatings[idx][field] = parseOptional(input.value);
+            entry[field] = parseOptional(input.value);
           }
-          updateSubmitState();
+
+          if (!entry.isOwnBeer && entry.lastSaved) {
+            const unchanged = valuesEqual(entry.overall, entry.lastSaved.overall)
+              && valuesEqual(entry.aroma, entry.lastSaved.aroma)
+              && valuesEqual(entry.appearance, entry.lastSaved.appearance)
+              && valuesEqual(entry.flavor, entry.lastSaved.flavor)
+              && valuesEqual(entry.mouthfeel, entry.lastSaved.mouthfeel);
+            entry.saved = unchanged;
+          }
+
+          renderRatingList();
         });
       });
 
@@ -317,7 +335,7 @@
         btn.addEventListener('click', async () => {
           const idx = Number(btn.dataset.saveIdx);
           const entry = localDraftRatings[idx];
-          if (!entry) return;
+          if (!entry || entry.isOwnBeer) return;
           if (entry.overall === null) {
             showMessage('rating-msg', 'Overall peab olema täidetud enne salvestamist.', 'warn');
             return;
@@ -335,7 +353,16 @@
                 mouthfeel: entry.mouthfeel
               })
             });
+            entry.saved = true;
+            entry.lastSaved = {
+              overall: entry.overall,
+              aroma: entry.aroma,
+              appearance: entry.appearance,
+              flavor: entry.flavor,
+              mouthfeel: entry.mouthfeel
+            };
             showMessage('rating-msg', `Hinnang salvestatud: ${entry.beerName}.`, 'ok');
+            renderRatingList();
           } catch (error) {
             showMessage('rating-msg', `Viga: ${error.message}`, 'warn');
           }
@@ -361,6 +388,11 @@
         localDraftRatings = registrations.map((beer) => {
           const existing = byBeer.get(beer.id);
           const isOwnBeer = beer.brewerName.toLowerCase() === currentUser.name.toLowerCase();
+          const overall = existing ? Number(existing.overall) : (isOwnBeer ? 0 : null);
+          const aroma = existing?.aroma ?? null;
+          const appearance = existing?.appearance ?? null;
+          const flavor = existing?.flavor ?? null;
+          const mouthfeel = existing?.mouthfeel ?? null;
           return {
             beerId: beer.id,
             brewerName: beer.brewerName,
@@ -368,11 +400,13 @@
             beerStyle: beer.beerStyle,
             beerAbv: beer.beerAbv,
             isOwnBeer,
-            overall: existing ? Number(existing.overall) : (isOwnBeer ? 0 : null),
-            aroma: existing?.aroma ?? null,
-            appearance: existing?.appearance ?? null,
-            flavor: existing?.flavor ?? null,
-            mouthfeel: existing?.mouthfeel ?? null
+            overall,
+            aroma,
+            appearance,
+            flavor,
+            mouthfeel,
+            saved: isOwnBeer ? true : Boolean(existing),
+            lastSaved: existing ? { overall, aroma, appearance, flavor, mouthfeel } : null
           };
         });
 
@@ -451,7 +485,8 @@
 
     document.getElementById('submit-all-ratings').addEventListener('click', async () => {
       if (!currentUser || localDraftRatings.length === 0) return showMessage('rating-msg', 'Hinnatavaid õllesid pole.', 'warn');
-      if (localDraftRatings.some((r) => r.overall === null)) return showMessage('rating-msg', 'Kõigile õlledele peab olema Overall sisestatud.', 'warn');
+      if (localDraftRatings.some((r) => !r.isOwnBeer && r.overall === null)) return showMessage('rating-msg', 'Kõigile teistele õlledele peab olema Overall sisestatud.', 'warn');
+      if (localDraftRatings.some((r) => !r.isOwnBeer && !r.saved)) return showMessage('rating-msg', 'Salvesta kõik teiste õllede hinnangud enne lõpetamist.', 'warn');
 
       try {
         await api('/api/ratings/complete', { method: 'POST', body: JSON.stringify({ judgeName: currentUser.name }) });

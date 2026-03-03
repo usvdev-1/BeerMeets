@@ -361,12 +361,21 @@ const server = http.createServer(async (req, res) => {
       const user = userByName(store, judgeName);
       if (!user) return json(res, 404, { error: 'User not found' });
 
-      const requiredBeerIds = new Set(store.registrations.map((r) => r.id));
-      if (requiredBeerIds.size === 0) return json(res, 400, { error: 'No registered beers' });
+      const requiredBeerIds = new Set(
+        store.registrations
+          .filter((r) => String(r.brewerName || '').toLowerCase() !== judgeName.toLowerCase())
+          .map((r) => r.id)
+      );
+      if (requiredBeerIds.size === 0) {
+        user.ratingCompleted = true;
+        user.ratingCompletedAt = Date.now();
+        writeStore(store);
+        return json(res, 200, { ok: true, user: sanitizeUser(user) });
+      }
 
       const judgeRatings = store.ratings.filter((r) => String(r.judgeName).toLowerCase() === judgeName.toLowerCase());
       const judgeBeerIds = new Set(judgeRatings.map((r) => r.beerId));
-      const allRated = requiredBeerIds.size === judgeBeerIds.size && [...requiredBeerIds].every((id) => judgeBeerIds.has(id));
+      const allRated = [...requiredBeerIds].every((id) => judgeBeerIds.has(id));
       if (!allRated) return json(res, 400, { error: 'Not all beers are rated' });
 
       user.ratingCompleted = true;
