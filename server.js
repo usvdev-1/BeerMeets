@@ -146,6 +146,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+
+  if (req.method === 'POST' && url.pathname === '/api/logout') {
+    return json(res, 200, { ok: true }, { 'Set-Cookie': 'beermeets_user=; Path=/; Max-Age=0; SameSite=Lax' });
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/session') {
     const store = readStore();
     const cookies = parseCookies(req.headers.cookie);
