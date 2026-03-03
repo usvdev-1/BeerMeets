@@ -1,0 +1,9 @@
+{
+  "name": "beermeets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BeerMeets Node app",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
