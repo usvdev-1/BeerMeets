@@ -207,7 +207,9 @@
       const payload = { brewerName: document.getElementById('brewerName').value.trim(), beerName: document.getElementById('beerName').value.trim(), beerStyle: document.getElementById('beerStyle').value.trim(), beerAbv: Number(document.getElementById('beerAbv').value) };
       try {
         await api('/api/registrations', { method: 'POST', body: JSON.stringify(payload) });
+        const brewerValue = document.getElementById('brewerName').value;
         e.target.reset();
+        document.getElementById('brewerName').value = brewerValue;
         showMessage('registration-msg', 'Õlu on serverisse registreeritud.', 'ok');
       } catch (error) {
         showMessage('registration-msg', `Viga: ${error.message}`, 'warn');
