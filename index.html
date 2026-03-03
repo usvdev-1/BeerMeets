@@ -44,12 +44,13 @@
   <div id="login-wrap" class="login-wrap">
     <div class="login-card">
       <h2>Sisselogimine</h2>
-      <p class="hint">Sisesta oma nimi, et süsteemi siseneda.</p>
+      <p class="hint">Esmalt registreeri kasutaja, seejärel logi sisse nimega.</p>
       <div class="field">
         <label for="loginName">Nimi</label>
         <input id="loginName" maxlength="60" />
       </div>
       <div class="actions">
+        <button id="register-btn" type="button">Registreeri kasutaja</button>
         <button class="primary" id="login-btn" type="button">Sisene</button>
       </div>
       <div id="login-msg"></div>
@@ -251,11 +252,23 @@
       updateSubmitState();
     };
 
+
+    document.getElementById('register-btn').addEventListener('click', async () => {
+      const name = document.getElementById('loginName').value.trim();
+      if (!name) return showMessage('login-msg', 'Sisesta nimi.', 'warn');
+      try {
+        await api('/api/users/register', { method: 'POST', body: JSON.stringify({ name }) });
+        showMessage('login-msg', 'Kasutaja registreeritud. Nüüd saad sisse logida.', 'ok');
+      } catch (error) {
+        showMessage('login-msg', `Viga: ${error.message}`, 'warn');
+      }
+    });
+
     document.getElementById('login-btn').addEventListener('click', async () => {
       const name = document.getElementById('loginName').value.trim();
       if (!name) return showMessage('login-msg', 'Sisesta nimi.', 'warn');
       try {
-        const user = await api('/api/login', { method: 'POST', body: JSON.stringify({ name }) });
+        const user = await api('/api/users/login', { method: 'POST', body: JSON.stringify({ name }) });
         currentUser = user;
         document.getElementById('login-wrap').classList.add('hidden');
         document.getElementById('app').classList.remove('hidden');

@@ -115,14 +115,45 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/users/register') {
+    try {
+      const body = await readBody(req);
+      const name = cleanName(body.name);
+      if (!name) return json(res, 400, { error: 'Name is required' });
+      const store = readStore();
+      const exists = userByName(store, name);
+      if (exists) return json(res, 409, { error: 'User already exists' });
+      const user = ensureUser(store, name);
+      writeStore(store);
+      return json(res, 201, user);
+    } catch {
+      return json(res, 400, { error: 'Malformed JSON' });
+    }
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/users/login') {
+    try {
+      const body = await readBody(req);
+      const name = cleanName(body.name);
+      if (!name) return json(res, 400, { error: 'Name is required' });
+      const store = readStore();
+      const user = userByName(store, name);
+      if (!user) return json(res, 404, { error: 'User not found. Please register first.' });
+      return json(res, 200, user);
+    } catch {
+      return json(res, 400, { error: 'Malformed JSON' });
+    }
+  }
+
+  // Backward compatible alias
   if (req.method === 'POST' && url.pathname === '/api/login') {
     try {
       const body = await readBody(req);
       const name = cleanName(body.name);
       if (!name) return json(res, 400, { error: 'Name is required' });
       const store = readStore();
-      const user = ensureUser(store, name);
-      writeStore(store);
+      const user = userByName(store, name);
+      if (!user) return json(res, 404, { error: 'User not found. Please register first.' });
       return json(res, 200, user);
     } catch {
       return json(res, 400, { error: 'Malformed JSON' });
