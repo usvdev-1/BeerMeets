@@ -37,13 +37,24 @@
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .field { display: flex; flex-direction: column; gap: 6px; }
     label { font-size: 14px; color: var(--muted); }
-    input, select, button { font: inherit; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: white; }
+    input, button {
+      font: inherit;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: white;
+    }
     button.primary { border-color: var(--accent); background: var(--accent); color: white; cursor: pointer; font-weight: 600; }
     button.primary:hover { background: var(--accent-2); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
     .hint { color: var(--muted); font-size: 14px; }
     .msg { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
     .msg.ok { background: var(--ok-bg); color: var(--ok); }
     .msg.warn { background: var(--warn-bg); color: var(--warn); }
+    .beer-rating-list { display: grid; gap: 12px; margin-top: 12px; }
+    .beer-rating-item { border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+    .beer-title { font-weight: 700; margin-bottom: 8px; }
+    .small-note { font-size: 12px; color: var(--muted); }
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
     th, td { border-bottom: 1px solid var(--border); text-align: left; padding: 10px 8px; vertical-align: top; font-size: 14px; }
     .score { font-weight: 700; color: var(--accent-2); }
@@ -60,7 +71,7 @@
     <header class="header">
       <h1>BeerMeets</h1>
       <p>Регистрация сортов пива перед встречей и оценивание во время дегустации.</p>
-      <p class="hint">Данные сохраняются на общем сервере и доступны всем участникам. Итог строится только по <b>Overall Impression</b> (1–10).</p>
+      <p class="hint">Оценки сначала хранятся локально на устройстве, затем отправляются на сервер одной кнопкой.</p>
     </header>
 
     <nav class="tabs" aria-label="Разделы">
@@ -88,24 +99,25 @@
 
     <section id="rating" class="card hidden">
       <h2>Оценка во время встречи</h2>
-      <form id="rating-form">
-        <div class="grid">
-          <div class="field"><label for="judgeName">Ваше имя (как при регистрации)</label><input id="judgeName" required maxlength="60" /></div>
-          <div class="field"><label for="beerSelect">Выберите пиво</label><select id="beerSelect" required></select></div>
-          <div class="field"><label for="overall">Overall Impression (1–10)</label><input id="overall" type="number" min="1" max="10" required /></div>
-          <div class="field"><label for="aroma">Aroma (опц. 1–10)</label><input id="aroma" type="number" min="1" max="10" /></div>
-          <div class="field"><label for="appearance">Appearance (опц. 1–10)</label><input id="appearance" type="number" min="1" max="10" /></div>
-          <div class="field"><label for="flavor">Flavor (опц. 1–10)</label><input id="flavor" type="number" min="1" max="10" /></div>
-          <div class="field"><label for="mouthfeel">Mouthfeel (опц. 1–10)</label><input id="mouthfeel" type="number" min="1" max="10" /></div>
+      <div class="grid">
+        <div class="field">
+          <label for="judgeName">Ваше имя (как при регистрации)</label>
+          <input id="judgeName" required maxlength="60" />
         </div>
-        <div class="actions"><button class="primary" type="submit">Сохранить оценку</button></div>
-      </form>
+      </div>
+      <div class="actions">
+        <button class="primary" type="button" id="load-rating-session">Загрузить список пива</button>
+        <button class="primary" type="button" id="submit-all-ratings" disabled>Отправить оценки на сервер</button>
+      </div>
+      <p class="hint">Для вашего пива Overall автоматически = 0 и не учитывается в среднем балле.</p>
+      <div id="rating-progress" class="hint"></div>
+      <div id="beer-rating-list" class="beer-rating-list"></div>
       <div id="rating-msg"></div>
     </section>
 
     <section id="results" class="card hidden">
       <h2>Таблица результатов</h2>
-      <p class="hint">Итог основан на среднем значении Overall Impression.</p>
+      <p class="hint">Средний Overall считается без оценок 0.</p>
       <div id="results-wrap"></div>
     </section>
   </div>
@@ -113,6 +125,9 @@
   <script>
     const tabs = document.querySelectorAll('.tab-btn');
     const sections = ['registration', 'rating', 'results'];
+
+    let sessionJudgeName = '';
+    let localDraftRatings = [];
 
     const showMessage = (elementId, text, type) => {
       document.getElementById(elementId).innerHTML = `<div class="msg ${type}">${text}</div>`;
@@ -136,22 +151,150 @@
         const tab = btn.dataset.tab;
         tabs.forEach((b) => b.classList.toggle('active', b === btn));
         sections.forEach((id) => document.getElementById(id).classList.toggle('hidden', id !== tab));
-        if (tab === 'rating') await renderBeerSelect();
         if (tab === 'results') await renderResults();
       });
     });
 
-    const renderBeerSelect = async () => {
-      const select = document.getElementById('beerSelect');
-      const registrations = await fetchRegistrations();
-      if (registrations.length === 0) {
-        select.innerHTML = '<option value="">Сначала зарегистрируйте пиво</option>';
+    const parseOptional = (raw) => (raw === '' ? null : Number(raw));
+
+    const updateSubmitState = () => {
+      const pending = localDraftRatings.filter((r) => r.overall === null).length;
+      const total = localDraftRatings.length;
+      const done = total > 0 ? total - pending : 0;
+
+      document.getElementById('rating-progress').textContent = total
+        ? `Заполнено ${done} из ${total} оценок.`
+        : 'Сначала загрузите список пива.';
+
+      const canSubmit = total > 0 && pending === 0;
+      document.getElementById('submit-all-ratings').disabled = !canSubmit;
+    };
+
+    const renderRatingList = async () => {
+      const wrap = document.getElementById('beer-rating-list');
+      if (localDraftRatings.length === 0) {
+        wrap.innerHTML = '<p class="hint">Нет пива для оценки.</p>';
+        updateSubmitState();
         return;
       }
-      select.innerHTML = '<option value="">Выберите пиво</option>' + registrations
-        .map((r) => `<option value="${r.id}">${r.beerName} — ${r.beerStyle} (${r.brewerName})</option>`)
-        .join('');
+
+      wrap.innerHTML = localDraftRatings.map((entry, idx) => `
+        <div class="beer-rating-item">
+          <div class="beer-title">${entry.beerName} — ${entry.beerStyle}</div>
+          <div class="small-note">Пивовар: ${entry.brewerName}, ABV: ${entry.beerAbv}%</div>
+          ${entry.isOwnBeer ? '<div class="small-note">Это ваше пиво: Overall = 0 (не учитывается в среднем).</div>' : ''}
+          <div class="grid" style="margin-top:8px;">
+            <div class="field">
+              <label>Overall Impression (0-10)</label>
+              <input type="number" min="0" max="10" value="${entry.overall ?? ''}" data-idx="${idx}" data-field="overall" ${entry.isOwnBeer ? 'readonly' : ''} />
+            </div>
+            <div class="field">
+              <label>Aroma (опц. 1-10)</label>
+              <input type="number" min="1" max="10" value="${entry.aroma ?? ''}" data-idx="${idx}" data-field="aroma" />
+            </div>
+            <div class="field">
+              <label>Appearance (опц. 1-10)</label>
+              <input type="number" min="1" max="10" value="${entry.appearance ?? ''}" data-idx="${idx}" data-field="appearance" />
+            </div>
+            <div class="field">
+              <label>Flavor (опц. 1-10)</label>
+              <input type="number" min="1" max="10" value="${entry.flavor ?? ''}" data-idx="${idx}" data-field="flavor" />
+            </div>
+            <div class="field">
+              <label>Mouthfeel (опц. 1-10)</label>
+              <input type="number" min="1" max="10" value="${entry.mouthfeel ?? ''}" data-idx="${idx}" data-field="mouthfeel" />
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      wrap.querySelectorAll('input').forEach((input) => {
+        input.addEventListener('input', () => {
+          const idx = Number(input.dataset.idx);
+          const field = input.dataset.field;
+          if (field === 'overall') {
+            const v = input.value === '' ? null : Number(input.value);
+            localDraftRatings[idx].overall = Number.isNaN(v) ? null : v;
+          } else {
+            localDraftRatings[idx][field] = parseOptional(input.value);
+          }
+          updateSubmitState();
+        });
+      });
+
+      updateSubmitState();
     };
+
+    document.getElementById('load-rating-session').addEventListener('click', async () => {
+      const judgeName = document.getElementById('judgeName').value.trim();
+      if (!judgeName) {
+        showMessage('rating-msg', 'Введите имя.', 'warn');
+        return;
+      }
+
+      try {
+        const registrations = await fetchRegistrations();
+        const nameSet = new Set(registrations.map((r) => r.brewerName.toLowerCase()));
+        if (!nameSet.has(judgeName.toLowerCase())) {
+          showMessage('rating-msg', 'Имя не найдено среди зарегистрированных пивоваров.', 'warn');
+          return;
+        }
+
+        sessionJudgeName = judgeName;
+        localDraftRatings = registrations.map((beer) => {
+          const isOwnBeer = beer.brewerName.toLowerCase() === judgeName.toLowerCase();
+          return {
+            beerId: beer.id,
+            brewerName: beer.brewerName,
+            beerName: beer.beerName,
+            beerStyle: beer.beerStyle,
+            beerAbv: beer.beerAbv,
+            isOwnBeer,
+            overall: isOwnBeer ? 0 : null,
+            aroma: null,
+            appearance: null,
+            flavor: null,
+            mouthfeel: null
+          };
+        });
+
+        showMessage('rating-msg', 'Локальная сессия оценивания загружена.', 'ok');
+        await renderRatingList();
+      } catch (error) {
+        showMessage('rating-msg', `Ошибка: ${error.message}`, 'warn');
+      }
+    });
+
+    document.getElementById('submit-all-ratings').addEventListener('click', async () => {
+      if (!sessionJudgeName || localDraftRatings.length === 0) {
+        showMessage('rating-msg', 'Сначала загрузите сессию оценивания.', 'warn');
+        return;
+      }
+      if (localDraftRatings.some((r) => r.overall === null)) {
+        showMessage('rating-msg', 'Нужно заполнить Overall для всего пива.', 'warn');
+        return;
+      }
+
+      const payload = {
+        judgeName: sessionJudgeName,
+        ratings: localDraftRatings.map((r) => ({
+          beerId: r.beerId,
+          overall: Number(r.overall),
+          aroma: r.aroma,
+          appearance: r.appearance,
+          flavor: r.flavor,
+          mouthfeel: r.mouthfeel
+        }))
+      };
+
+      try {
+        await api('/api/ratings/batch', { method: 'POST', body: JSON.stringify(payload) });
+        showMessage('rating-msg', 'Все оценки отправлены на сервер.', 'ok');
+        await renderResults();
+      } catch (error) {
+        showMessage('rating-msg', `Ошибка: ${error.message}`, 'warn');
+      }
+    });
 
     document.getElementById('registration-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -161,43 +304,13 @@
         beerStyle: document.getElementById('beerStyle').value.trim(),
         beerAbv: Number(document.getElementById('beerAbv').value)
       };
-
       try {
         await api('/api/registrations', { method: 'POST', body: JSON.stringify(payload) });
         e.target.reset();
-        showMessage('registration-msg', 'Пиво успешно зарегистрировано на сервере.', 'ok');
-        await renderBeerSelect();
+        showMessage('registration-msg', 'Пиво зарегистрировано на сервере.', 'ok');
         await renderResults();
       } catch (error) {
         showMessage('registration-msg', `Ошибка: ${error.message}`, 'warn');
-      }
-    });
-
-    const parseOptional = (id) => {
-      const raw = document.getElementById(id).value;
-      return raw === '' ? null : Number(raw);
-    };
-
-    document.getElementById('rating-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const payload = {
-        judgeName: document.getElementById('judgeName').value.trim(),
-        beerId: document.getElementById('beerSelect').value,
-        overall: Number(document.getElementById('overall').value),
-        aroma: parseOptional('aroma'),
-        appearance: parseOptional('appearance'),
-        flavor: parseOptional('flavor'),
-        mouthfeel: parseOptional('mouthfeel')
-      };
-
-      try {
-        await api('/api/ratings', { method: 'POST', body: JSON.stringify(payload) });
-        e.target.reset();
-        showMessage('rating-msg', 'Оценка сохранена на сервере.', 'ok');
-        await renderBeerSelect();
-        await renderResults();
-      } catch (error) {
-        showMessage('rating-msg', `Ошибка: ${error.message}`, 'warn');
       }
     });
 
@@ -205,8 +318,11 @@
       if (!confirm('Удалить все регистрации и оценки на сервере?')) return;
       try {
         await api('/api/all', { method: 'DELETE' });
-        showMessage('registration-msg', 'Все данные встречи удалены с сервера.', 'ok');
-        await renderBeerSelect();
+        localDraftRatings = [];
+        sessionJudgeName = '';
+        document.getElementById('beer-rating-list').innerHTML = '';
+        updateSubmitState();
+        showMessage('registration-msg', 'Данные встречи удалены.', 'ok');
         await renderResults();
       } catch (error) {
         showMessage('registration-msg', `Ошибка: ${error.message}`, 'warn');
@@ -216,21 +332,28 @@
     const renderResults = async () => {
       const [registrations, ratings] = await Promise.all([fetchRegistrations(), fetchRatings()]);
       const wrap = document.getElementById('results-wrap');
-
       if (registrations.length === 0) {
         wrap.innerHTML = '<p class="hint">Нет зарегистрированного пива.</p>';
         return;
       }
 
       const rows = registrations.map((beer) => {
-        const beerRatings = ratings.filter((r) => r.beerId === beer.id);
-        const avgOverall = beerRatings.length ? (beerRatings.reduce((sum, r) => sum + r.overall, 0) / beerRatings.length).toFixed(2) : '—';
-        return { beer, votes: beerRatings.length, avgOverall: avgOverall === '—' ? -1 : Number(avgOverall), avgText: avgOverall };
+        const beerRatings = ratings.filter((r) => r.beerId === beer.id && r.overall > 0);
+        const avgOverall = beerRatings.length
+          ? (beerRatings.reduce((sum, r) => sum + r.overall, 0) / beerRatings.length).toFixed(2)
+          : '—';
+
+        return {
+          beer,
+          votes: beerRatings.length,
+          avgOverall: avgOverall === '—' ? -1 : Number(avgOverall),
+          avgText: avgOverall
+        };
       }).sort((a, b) => b.avgOverall - a.avgOverall);
 
       wrap.innerHTML = `
         <table>
-          <thead><tr><th>Пиво</th><th>Пивовар</th><th>ABV</th><th>Overall (сред.)</th><th>Оценок</th></tr></thead>
+          <thead><tr><th>Пиво</th><th>Пивовар</th><th>ABV</th><th>Overall (сред.)</th><th>Учитываемых оценок</th></tr></thead>
           <tbody>
             ${rows.map((row) => `
               <tr>
@@ -247,8 +370,8 @@
     };
 
     (async () => {
+      updateSubmitState();
       try {
-        await renderBeerSelect();
         await renderResults();
       } catch (error) {
         showMessage('registration-msg', `Не удалось подключиться к серверу: ${error.message}`, 'warn');

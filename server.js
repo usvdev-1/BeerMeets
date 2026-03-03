@@ -59,17 +59,36 @@ const readBody = (req) => new Promise((resolve, reject) => {
 });
 
 const sendFile = (res, filePath) => {
-  const ext = path.extname(filePath).toLowerCase();
-  const type = ext === '.html' ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8';
   fs.readFile(filePath, (err, content) => {
     if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Not found');
       return;
     }
-    res.writeHead(200, { 'Content-Type': type });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(content);
   });
+};
+
+const parseOptional = (v) => (v === null || v === '' || v === undefined ? null : Number(v));
+const validOptional = (v) => v === null || (!Number.isNaN(v) && v >= 1 && v <= 10);
+
+const validateRatingEntry = (entry, registrationsById) => {
+  const beerId = String(entry.beerId || '');
+  const overall = Number(entry.overall);
+  const aroma = parseOptional(entry.aroma);
+  const appearance = parseOptional(entry.appearance);
+  const flavor = parseOptional(entry.flavor);
+  const mouthfeel = parseOptional(entry.mouthfeel);
+
+  if (!registrationsById.has(beerId)) return { ok: false };
+  if (Number.isNaN(overall) || overall < 0 || overall > 10) return { ok: false };
+  if (![aroma, appearance, flavor, mouthfeel].every(validOptional)) return { ok: false };
+
+  return {
+    ok: true,
+    rating: { beerId, overall, aroma, appearance, flavor, mouthfeel }
+  };
 };
 
 const server = http.createServer(async (req, res) => {
@@ -113,7 +132,7 @@ const server = http.createServer(async (req, res) => {
       store.registrations.push(record);
       writeStore(store);
       json(res, 201, record);
-    } catch (error) {
+    } catch {
       json(res, 400, { error: 'Malformed JSON' });
     }
     return;
@@ -124,44 +143,59 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/ratings') {
+  if (req.method === 'POST' && url.pathname === '/api/ratings/batch') {
     try {
       const body = await readBody(req);
       const judgeName = String(body.judgeName || '').trim();
-      const beerId = String(body.beerId || '');
-      const overall = Number(body.overall);
-      const parseOptional = (v) => (v === null || v === '' || v === undefined ? null : Number(v));
-      const aroma = parseOptional(body.aroma);
-      const appearance = parseOptional(body.appearance);
-      const flavor = parseOptional(body.flavor);
-      const mouthfeel = parseOptional(body.mouthfeel);
+      const incoming = Array.isArray(body.ratings) ? body.ratings : [];
 
       const store = readStore();
-      const registeredNames = new Set(store.registrations.map((r) => r.brewerName.toLowerCase()));
-      const beerExists = store.registrations.some((r) => r.id === beerId);
-      const subscores = [aroma, appearance, flavor, mouthfeel];
-      const validOptional = subscores.every((s) => s === null || (!Number.isNaN(s) && s >= 1 && s <= 10));
-
-      if (!registeredNames.has(judgeName.toLowerCase()) || !beerExists || Number.isNaN(overall) || overall < 1 || overall > 10 || !validOptional) {
-        json(res, 400, { error: 'Invalid rating data' });
+      const nameSet = new Set(store.registrations.map((r) => r.brewerName.toLowerCase()));
+      if (!judgeName || !nameSet.has(judgeName.toLowerCase())) {
+        json(res, 400, { error: 'Unknown judge' });
         return;
       }
 
-      const record = {
-        id: randomUUID(),
-        judgeName,
-        beerId,
-        overall,
-        aroma,
-        appearance,
-        flavor,
-        mouthfeel,
-        createdAt: Date.now()
-      };
-      store.ratings.push(record);
+      if (incoming.length !== store.registrations.length || incoming.length === 0) {
+        json(res, 400, { error: 'Must provide ratings for all registered beers' });
+        return;
+      }
+
+      const registrationsById = new Map(store.registrations.map((r) => [r.id, r]));
+      const uniqueBeerIds = new Set();
+      const prepared = [];
+
+      for (const entry of incoming) {
+        const checked = validateRatingEntry(entry, registrationsById);
+        if (!checked.ok) {
+          json(res, 400, { error: 'Invalid rating data' });
+          return;
+        }
+        if (uniqueBeerIds.has(checked.rating.beerId)) {
+          json(res, 400, { error: 'Duplicate beer rating' });
+          return;
+        }
+        uniqueBeerIds.add(checked.rating.beerId);
+
+        prepared.push({
+          id: randomUUID(),
+          judgeName,
+          ...checked.rating,
+          createdAt: Date.now()
+        });
+      }
+
+      if (uniqueBeerIds.size !== store.registrations.length) {
+        json(res, 400, { error: 'Missing beer ratings' });
+        return;
+      }
+
+      const judgeLower = judgeName.toLowerCase();
+      store.ratings = store.ratings.filter((r) => String(r.judgeName || '').toLowerCase() !== judgeLower);
+      store.ratings.push(...prepared);
       writeStore(store);
-      json(res, 201, record);
-    } catch (error) {
+      json(res, 201, { inserted: prepared.length });
+    } catch {
       json(res, 400, { error: 'Malformed JSON' });
     }
     return;
